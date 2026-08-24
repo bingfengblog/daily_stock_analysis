@@ -1689,6 +1689,36 @@ def _market_data_from_payload(
                 negative_tone=negative_tone,
                 default_tone=negative_tone,
             )
+    limit_up_ladder = payload.get("limit_up_ladder")
+    if isinstance(limit_up_ladder, list):
+        ladder_rows = []
+        for item in limit_up_ladder[:3]:
+            if not isinstance(item, Mapping):
+                continue
+            label = _clean_value(item.get("label"), limit=8)
+            stocks = item.get("stocks")
+            if not label or not isinstance(stocks, list):
+                continue
+            names = []
+            for stock in stocks[:2]:
+                if not isinstance(stock, Mapping):
+                    continue
+                name = _clean_value(stock.get("name"), limit=10)
+                if name:
+                    names.append(name)
+            if names:
+                ladder_rows.append({
+                    "name": f"{label} {'/'.join(names)}",
+                    "change_pct": None,
+                })
+        if ladder_rows:
+            poster.sectors = _merge_sector_rankings(
+                poster.sectors,
+                ladder_rows,
+                positive_tone=positive_tone,
+                negative_tone=negative_tone,
+                default_tone="hot",
+            )
     return poster
 
 

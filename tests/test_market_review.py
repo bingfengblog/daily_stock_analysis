@@ -609,6 +609,41 @@ class MarketReviewLocalizationTestCase(unittest.TestCase):
         self.assertIn("#### 领跌板块 Top 5", markdown)
         self.assertIn("| 1 | 煤炭 | -1.12% |", markdown)
 
+    def test_render_market_review_payload_markdown_appends_limit_up_ladder_fallback(self) -> None:
+        markdown = market_review_module._render_market_review_payload_markdown(
+            {
+                "title": "2026-06-03 大盘复盘",
+                "language": "zh",
+                "sections": [
+                    {
+                        "key": "overview",
+                        "title": "Overview",
+                        "markdown": "> 今日短线情绪回暖。",
+                    }
+                ],
+                "limit_up_ladder": [
+                    {
+                        "label": "4板",
+                        "stocks": [{"code": "002412", "name": "汉森制药"}],
+                    },
+                    {
+                        "label": "3板",
+                        "stocks": [
+                            {"code": "000017", "name": "深中华A"},
+                            {"code": "000931", "name": "中关村"},
+                        ],
+                    },
+                ],
+            },
+            wrapper_title="🎯 大盘复盘",
+        )
+
+        self.assertIn("### 板块主线", markdown)
+        self.assertIn("#### 连板梯队", markdown)
+        self.assertIn("| 连板数 | 上市公司 |", markdown)
+        self.assertIn("| 4板 | `汉森制药` |", markdown)
+        self.assertIn("| 3板 | `深中华A` `中关村` |", markdown)
+
     def test_render_market_review_payload_markdown_keeps_injected_chinese_sector_block_once(self) -> None:
         markdown = market_review_module._render_market_review_payload_markdown(
             {

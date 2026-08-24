@@ -720,6 +720,8 @@ def _markdown_contains_sector_markers(text: str) -> bool:
         "#### Lagging Sectors",
         "#### Leading Industry Sectors",
         "#### Lagging Industry Sectors",
+        "#### 连板梯队",
+        "#### Limit-up Streak Ladder",
         "| 排名 | 板块 |",
         "| 排名 | 行业板块 |",
         "| Rank | Sector |",
@@ -729,11 +731,20 @@ def _markdown_contains_sector_markers(text: str) -> bool:
 
 def _render_sector_payload_block(payload: Dict[str, Any]) -> str:
     sectors = payload.get("sectors")
-    if not isinstance(sectors, dict):
-        return ""
-    top = sectors.get("top") if isinstance(sectors.get("top"), list) else []
-    bottom = sectors.get("bottom") if isinstance(sectors.get("bottom"), list) else []
-    if not top and not bottom:
+    top = (
+        sectors.get("top")
+        if isinstance(sectors, dict) and isinstance(sectors.get("top"), list)
+        else []
+    )
+    bottom = (
+        sectors.get("bottom")
+        if isinstance(sectors, dict) and isinstance(sectors.get("bottom"), list)
+        else []
+    )
+    limit_up_ladder = payload.get("limit_up_ladder")
+    if not isinstance(limit_up_ladder, list):
+        limit_up_ladder = []
+    if not top and not bottom and not limit_up_ladder:
         return ""
 
     language = normalize_report_language(payload.get("language"))
@@ -760,6 +771,28 @@ def _render_sector_payload_block(payload: Dict[str, Any]) -> str:
                 continue
             name = str(sector.get("name") or "-").strip() or "-"
             lines.append(f"| {rank} | {name} | {_format_sector_change_pct(sector)} |")
+    if limit_up_ladder:
+        if lines:
+            lines.append("")
+        if language == "en":
+            lines.extend(["#### Limit-up Streak Ladder", "| Streak | Companies |", "| --- | --- |"])
+        else:
+            lines.extend(["#### 连板梯队", "| 连板数 | 上市公司 |", "| --- | --- |"])
+        for item in limit_up_ladder:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            stocks = item.get("stocks")
+            if not label or not isinstance(stocks, list):
+                continue
+            names = [
+                str(stock.get("name") or "").strip().replace("`", "").replace("|", "\\|")
+                for stock in stocks
+                if isinstance(stock, dict) and str(stock.get("name") or "").strip()
+            ]
+            if names:
+                company_cell = " ".join(f"`{name}`" for name in names)
+                lines.append(f"| {label} | {company_cell} |")
     return "\n".join(lines).strip()
 
 

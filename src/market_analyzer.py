@@ -103,6 +103,7 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    limit_up_pool: List[Dict] = field(default_factory=list)   # 涨停池明细（含连板数）
 
 
 @dataclass
@@ -442,6 +443,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
             self._get_concept_rankings(overview)
+            self._get_limit_up_pool(overview)
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
@@ -568,6 +570,31 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         except Exception as e:
             logger.warning("[大盘] %s action=get_concept_rankings status=failed error=%s", self._log_context(), e)
+
+    def _get_limit_up_pool(self, overview: MarketOverview):
+        """获取涨停池明细，用于复盘报告连板梯队（A 股专属，fail-open）。"""
+        if self.region != "cn":
+            return
+        try:
+            logger.info("[大盘] %s action=get_limit_up_pool status=start", self._log_context())
+
+            query_date = overview.date.replace("-", "")
+            rows = self.data_manager.get_limit_up_pool(date=query_date, n=200)
+
+            if rows:
+                overview.limit_up_pool = rows
+                ladder = self._build_limit_up_ladder(overview)
+                logger.info(
+                    "[大盘] %s action=get_limit_up_pool status=success count=%d ladder_levels=%s",
+                    self._log_context(),
+                    len(rows),
+                    [item["label"] for item in ladder],
+                )
+            else:
+                logger.warning("[大盘] %s action=get_limit_up_pool status=empty", self._log_context())
+
+        except Exception as e:
+            logger.warning("[大盘] %s action=get_limit_up_pool status=failed error=%s", self._log_context(), e)
     
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
@@ -810,6 +837,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "top": list(overview.top_concepts or []),
                 "bottom": list(overview.bottom_concepts or []),
             },
+            "limit_up_pool": list(overview.limit_up_pool or []),
+            "limit_up_ladder": self._build_limit_up_ladder(overview),
             "news": [self._normalize_news_item(item) for item in (news or [])[:8]],
             "sections": sections,
             "markdown_report": report,
@@ -1136,12 +1165,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return "\n".join(lines)
 
     def _build_sector_block(self, overview: MarketOverview) -> str:
-        """Build industry and concept ranking blocks."""
+        """Build industry, concept and limit-up streak blocks."""
         if (
             not overview.top_sectors
             and not overview.bottom_sectors
             and not overview.top_concepts
             and not overview.bottom_concepts
+            and not overview.limit_up_pool
         ):
             return ""
         lines = []
@@ -1172,6 +1202,44 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             append_ranking("#### 行业板块领跌 Top 5", "行业板块", overview.bottom_sectors)
             append_ranking("#### 概念板块领涨 Top 5", "概念板块", overview.top_concepts)
             append_ranking("#### 概念板块领跌 Top 5", "概念板块", overview.bottom_concepts)
+        ladder_block = self._build_limit_up_ladder_block(overview, language=language)
+        if ladder_block:
+            if lines:
+                lines.append("")
+            lines.append(ladder_block)
+        return "\n".join(lines)
+
+    def _build_limit_up_ladder_block(
+        self,
+        overview: MarketOverview,
+        *,
+        language: str | None = None,
+    ) -> str:
+        """Build a Markdown table for 2+ board streaks, excluding first boards."""
+        ladder = self._build_limit_up_ladder(overview)
+        if not ladder:
+            return ""
+        language = language or self._get_review_language()
+        if language == "en":
+            lines = [
+                "#### Limit-up Streak Ladder",
+                "| Streak | Companies |",
+                "| --- | --- |",
+            ]
+        else:
+            lines = [
+                "#### 连板梯队",
+                "| 连板数 | 上市公司 |",
+                "| --- | --- |",
+            ]
+        for item in ladder:
+            names = " ".join(
+                f"`{self._escape_table_code_label(stock.get('name'))}`"
+                for stock in item.get("stocks", [])
+                if stock.get("name")
+            )
+            if names:
+                lines.append(f"| {item['label']} | {names} |")
         return "\n".join(lines)
 
     def _build_news_block(self, news: List) -> str:
@@ -1253,6 +1321,68 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 continue
             parts.append(f"{name}({cls._format_signed_pct(item.get('change_pct'))})")
         return ", ".join(parts)
+
+    @classmethod
+    def _build_limit_up_ladder(cls, overview: MarketOverview) -> List[Dict[str, Any]]:
+        """Group limit-up pool rows by consecutive boards, excluding first boards."""
+        grouped: Dict[int, List[Dict[str, str]]] = {}
+        seen_by_level: Dict[int, set[str]] = {}
+        for item in overview.limit_up_pool or []:
+            if not isinstance(item, dict):
+                continue
+            boards = cls._coerce_int(item.get("consecutive_boards", item.get("连板数")))
+            if boards is None or boards < 2:
+                continue
+            name = str(item.get("name") or item.get("名称") or "").strip()
+            if not name:
+                continue
+            code = str(item.get("code") or item.get("代码") or "").strip()
+            dedupe_key = code or name
+            level_seen = seen_by_level.setdefault(boards, set())
+            if dedupe_key in level_seen:
+                continue
+            level_seen.add(dedupe_key)
+            grouped.setdefault(boards, []).append({"code": code, "name": name})
+
+        return [
+            {
+                "consecutive_boards": boards,
+                "label": f"{boards}板",
+                "stocks": grouped[boards],
+            }
+            for boards in sorted(grouped, reverse=True)
+        ]
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return None
+            if pd.isna(value):
+                return None
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _format_limit_up_ladder_summary(cls, overview: MarketOverview) -> str:
+        parts = []
+        for item in cls._build_limit_up_ladder(overview):
+            names = "、".join(
+                stock["name"] for stock in item.get("stocks", [])[:8] if stock.get("name")
+            )
+            if not names:
+                continue
+            extra = len(item.get("stocks", [])) - 8
+            suffix = f"等{len(item.get('stocks', []))}只" if extra > 0 else ""
+            parts.append(f"{item['label']}: {names}{suffix}")
+        return "; ".join(parts)
+
+    @staticmethod
+    def _escape_table_code_label(value: Any) -> str:
+        return str(value or "").strip().replace("`", "").replace("|", "\\|")
 
     @staticmethod
     def _escape_markdown_link_label(value: str) -> str:
@@ -1343,7 +1473,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 (Interpret what turnover, participation, and flow signals imply.)
 
 ### 4. Sector Highlights
-(Distinguish industry-sector moves from concept/theme moves, then analyze drivers and persistence.)
+(Distinguish industry-sector moves from concept/theme moves, and use the 2+ limit-up streak ladder to assess short-term risk appetite when available.)
 
 ### 5. Outlook
 (Provide the near-term outlook based on price action and news.)
@@ -1362,7 +1492,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 section_number += 1
             if self.profile.has_sector_rankings:
                 sections.append(f"""### {section_number}. Sector Highlights
-(Analyze only the provided industry-sector and concept/theme rankings.)""")
+(Analyze only the provided industry-sector, concept/theme rankings, and 2+ limit-up streak ladder when available.)""")
                 section_number += 1
             sections.extend([
                 f"""### {section_number}. News Catalysts
@@ -1378,7 +1508,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         if self.profile.has_market_stats and self.profile.has_sector_rankings:
             return """### 三、板块主线
-（区分行业板块与概念题材，分析领涨/领跌背后的逻辑、持续性和是否形成主线）
+（区分行业板块与概念题材，结合连板梯队（不含首板）观察短线情绪和主线持续性）
 
 ### 四、资金与情绪
 （解读成交额、涨跌停结构、市场宽度和风险偏好）
@@ -1402,7 +1532,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             section_number += 1
 
         if self.profile.has_sector_rankings:
-            add_section("板块主线", "（仅分析已提供的行业板块与概念题材榜单，不扩展未提供的数据）")
+            add_section("板块主线", "（仅分析已提供的行业板块、概念题材榜单和连板梯队，不扩展未提供的数据）")
         if self.profile.has_market_stats:
             add_section("资金与情绪", "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）")
         add_section(
@@ -1431,6 +1561,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         bottom_sectors_text = self._format_ranking_summary(overview.bottom_sectors)
         top_concepts_text = self._format_ranking_summary(overview.top_concepts)
         bottom_concepts_text = self._format_ranking_summary(overview.bottom_concepts)
+        limit_up_ladder_text = self._format_limit_up_ladder_summary(overview)
         
         # 新闻信息 - 支持 SearchResult 对象或字典
         news_text = ""
@@ -1462,7 +1593,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 Industry leading: {top_sectors_text if top_sectors_text else "N/A"}
 Industry lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}
 Concept leading: {top_concepts_text if top_concepts_text else "N/A"}
-Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
+Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}
+Limit-up streak ladder (2+ only, excludes first-board): {limit_up_ladder_text if limit_up_ladder_text else "N/A"}"""
 
             data_limit_lines = []
             if not self.profile.has_market_stats:
@@ -1485,7 +1617,8 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 行业领涨: {top_sectors_text if top_sectors_text else "暂无数据"}
 行业领跌: {bottom_sectors_text if bottom_sectors_text else "暂无数据"}
 概念领涨: {top_concepts_text if top_concepts_text else "暂无数据"}
-概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}"""
+概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}
+连板梯队（不含首板）: {limit_up_ladder_text if limit_up_ladder_text else "暂无数据"}"""
 
             data_limit_lines = []
             if not self.profile.has_market_stats:
@@ -1703,13 +1836,21 @@ Output the report content directly, no extra commentary.
 {stats_block}
 """
             sector_section = ""
-            if self.profile.has_sector_rankings and (top_text or bottom_text or top_concept_text or bottom_concept_text):
+            ladder_block = self._build_limit_up_ladder_block(overview, language=template_language)
+            if self.profile.has_sector_rankings and (
+                top_text
+                or bottom_text
+                or top_concept_text
+                or bottom_concept_text
+                or ladder_block
+            ):
                 sector_section = f"""
 ### 4. Sector / Theme Highlights
 - **Industry Leaders**: {top_text or "N/A"}
 - **Industry Laggards**: {bottom_text or "N/A"}
 - **Concept Leaders**: {top_concept_text or "N/A"}
 - **Concept Laggards**: {bottom_concept_text or "N/A"}
+{ladder_block}
 """
             market_names = {
                 "us": "US Market Recap",

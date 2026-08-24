@@ -3544,6 +3544,43 @@ Index text.
         assert payload["sectors"]["top"][0]["name"] == "半导体"
         assert payload["concepts"]["top"][0]["name"] == "机器人概念"
 
+    def test_market_review_includes_limit_up_ladder_without_first_boards(self):
+        from src.market_analyzer import MarketIndex, MarketOverview
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value="复盘结果")
+        overview = MarketOverview(
+            date="2026-03-18",
+            indices=[
+                MarketIndex(code="000001", name="上证指数", current=3200.0, change_pct=0.6),
+            ],
+            limit_up_pool=[
+                {"code": "000001", "name": "汉森制药", "consecutive_boards": 4},
+                {"code": "000017", "name": "深中华A", "consecutive_boards": 3},
+                {"code": "000931", "name": "中关村", "consecutive_boards": "3"},
+                {"code": "002017", "name": "东信和平", "consecutive_boards": 2},
+                {"code": "000999", "name": "首板股", "consecutive_boards": 1},
+            ],
+        )
+
+        prompt = ma._build_review_prompt(overview, [])
+        table_block = ma._build_sector_block(overview)
+        payload = ma.build_market_review_payload(
+            overview,
+            [],
+            "A股复盘报告",
+            market_light_snapshot={"dimensions": {"breadth": {"score": 55, "available": False}}},
+        )
+
+        assert "连板梯队（不含首板）: 4板: 汉森制药; 3板: 深中华A、中关村; 2板: 东信和平" in prompt
+        assert "#### 连板梯队" in table_block
+        assert "| 连板数 | 上市公司 |" in table_block
+        assert "| 4板 | `汉森制药` |" in table_block
+        assert "| 3板 | `深中华A` `中关村` |" in table_block
+        assert "| 2板 | `东信和平` |" in table_block
+        assert "首板股" not in table_block
+        assert [item["label"] for item in payload["limit_up_ladder"]] == ["4板", "3板", "2板"]
+        assert payload["limit_up_ladder"][1]["stocks"][1]["name"] == "中关村"
+
     def test_us_english_indices_do_not_label_turnover_as_cny(self):
         from src.core.market_profile import US_PROFILE
         from src.core.market_strategy import get_market_strategy_blueprint

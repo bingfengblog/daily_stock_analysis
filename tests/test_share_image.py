@@ -321,6 +321,10 @@ def test_market_share_image_prefers_structured_market_metrics():
             "top": [{"name": "半导体", "change_pct": 4.25}],
             "bottom": [{"name": "货币金融服务", "change_pct": -1.10}],
         },
+        "limit_up_ladder": [
+            {"label": "4板", "stocks": [{"name": "汉森制药"}]},
+            {"label": "3板", "stocks": [{"name": "深中华A"}, {"name": "中关村"}]},
+        ],
     }
     html = build_share_image_html(
         """# A股大盘复盘
@@ -357,6 +361,8 @@ def test_market_share_image_prefers_structured_market_metrics():
     assert "4690" in html
     assert "2.56万亿" in html
     assert "半导体" in html
+    assert "4板 汉森制药" in html
+    assert "3板 深中华A/中关村" in html
     assert "科创50" in html
     assert "信号拆解" in html
     assert "86/100" in html
