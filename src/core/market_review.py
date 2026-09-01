@@ -722,6 +722,8 @@ def _markdown_contains_sector_markers(text: str) -> bool:
         "#### Lagging Industry Sectors",
         "#### 连板梯队",
         "#### Limit-up Streak Ladder",
+        "#### 涨停回踩选股",
+        "#### Limit-up Pullback Screen",
         "| 排名 | 板块 |",
         "| 排名 | 行业板块 |",
         "| Rank | Sector |",
@@ -744,7 +746,10 @@ def _render_sector_payload_block(payload: Dict[str, Any]) -> str:
     limit_up_ladder = payload.get("limit_up_ladder")
     if not isinstance(limit_up_ladder, list):
         limit_up_ladder = []
-    if not top and not bottom and not limit_up_ladder:
+    pullback_candidates = payload.get("limit_up_rebound_candidates")
+    if not isinstance(pullback_candidates, list):
+        pullback_candidates = []
+    if not top and not bottom and not limit_up_ladder and not pullback_candidates:
         return ""
 
     language = normalize_report_language(payload.get("language"))
@@ -793,6 +798,41 @@ def _render_sector_payload_block(payload: Dict[str, Any]) -> str:
             if names:
                 company_cell = " ".join(f"`{name}`" for name in names)
                 lines.append(f"| {label} | {company_cell} |")
+    if pullback_candidates:
+        if lines:
+            lines.append("")
+        if language == "en":
+            lines.extend([
+                "#### Limit-up Pullback Screen",
+                "| Stock | Code | Streak | Window | Prior Limit-up | Close High | Close Low | Range |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ])
+            window_suffix = "d"
+        else:
+            lines.extend([
+                "#### 涨停回踩选股",
+                "| 股票 | 代码 | 连板 | 区间 | 前涨停日 | 收盘高点 | 收盘低点 | 高低差 |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ])
+            window_suffix = "日"
+        for item in pullback_candidates:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip().replace("`", "").replace("|", "\\|")
+            code = str(item.get("code") or "-").strip().replace("|", "\\|") or "-"
+            if not name:
+                continue
+            boards = _coerce_int(item.get("consecutive_boards"))
+            board_text = f"{boards}板" if boards is not None else "-"
+            window_days = item.get("window_days") or "-"
+            prior_limit_date = str(item.get("prior_limit_up_date") or "-").strip() or "-"
+            high = _format_price_date_cell(item.get("high"), item.get("high_date"))
+            low = _format_price_date_cell(item.get("low"), item.get("low_date"))
+            range_pct = _format_unsigned_pct(item.get("range_pct"))
+            lines.append(
+                f"| `{name}` | {code} | {board_text} | {window_days}{window_suffix} | "
+                f"{prior_limit_date} | {high} | {low} | {range_pct} |"
+            )
     return "\n".join(lines).strip()
 
 
@@ -803,6 +843,32 @@ def _format_sector_change_pct(sector: Dict[str, Any]) -> str:
     except (TypeError, ValueError):
         return "--"
     return f"{value:+.2f}%"
+
+
+def _format_unsigned_pct(value: Any) -> str:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{numeric_value:.2f}%"
+
+
+def _format_price_date_cell(price: Any, date_value: Any) -> str:
+    try:
+        price_text = f"{float(price):.2f}"
+    except (TypeError, ValueError):
+        price_text = "--"
+    date_text = str(date_value or "").strip().replace("|", "\\|")
+    return f"{date_text} {price_text}".strip()
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_market_review_heading(value: Any) -> str:

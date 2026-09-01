@@ -13,13 +13,14 @@ import json
 import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 # Stub heavy dependencies before project imports
 for _mod in ("litellm", "google.generativeai", "google.genai", "anthropic"):
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
+import pandas as pd
 import pytest
 
 
@@ -3580,6 +3581,91 @@ Index text.
         assert "首板股" not in table_block
         assert [item["label"] for item in payload["limit_up_ladder"]] == ["4板", "3板", "2板"]
         assert payload["limit_up_ladder"][1]["stocks"][1]["name"] == "中关村"
+
+    def test_market_review_selects_limit_up_rebound_candidates_after_ladder(self):
+        from src.market_analyzer import MarketIndex, MarketOverview
+
+        def make_daily(pct_values, closes):
+            return pd.DataFrame({
+                "date": [
+                    "2026-03-04",
+                    "2026-03-05",
+                    "2026-03-06",
+                    "2026-03-09",
+                    "2026-03-10",
+                    "2026-03-11",
+                    "2026-03-12",
+                    "2026-03-13",
+                    "2026-03-16",
+                    "2026-03-17",
+                    "2026-03-18",
+                ],
+                "high": closes + [12.0],
+                "low": closes + [12.0],
+                "close": closes + [12.0],
+                "pct_chg": pct_values + [10.0],
+            })
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value="复盘结果")
+        daily_by_code = {
+            "000001": make_daily(
+                [0, 10.0, -2, -1, -1, -1, -1, -1, 2, 1],
+                [10.0, 12.0, 11.8, 11.5, 11.2, 11.0, 10.8, 10.6, 10.4, 10.0],
+            ),
+            "000002": make_daily(
+                [0, 1, -2, -1, -1, -1, -1, -1, 2, 1],
+                [10.0, 12.0, 11.8, 11.5, 11.2, 11.0, 10.8, 10.6, 10.4, 10.0],
+            ),
+            "000003": make_daily(
+                [0, 10.0, -2, -1, -1, -1, -1, -1, 2, 1],
+                [10.0, 14.0, 13.8, 13.5, 13.0, 12.6, 12.0, 11.5, 11.0, 10.8],
+            ),
+        }
+        ma.data_manager = SimpleNamespace(
+            get_daily_data=MagicMock(side_effect=lambda code, days=20: (daily_by_code[code], "unit"))
+        )
+        overview = MarketOverview(
+            date="2026-03-18",
+            indices=[
+                MarketIndex(code="000001", name="上证指数", current=3200.0, change_pct=0.6),
+            ],
+            limit_up_pool=[
+                {"code": "000001", "name": "左高右低", "consecutive_boards": 2},
+                {"code": "000002", "name": "无前涨停", "consecutive_boards": 1},
+                {"code": "000003", "name": "振幅过大", "consecutive_boards": 1},
+                {"code": "000004", "name": "ST测试", "consecutive_boards": 1},
+                {"code": "000005", "name": "三板形态", "consecutive_boards": 3},
+            ],
+        )
+
+        overview.limit_up_rebound_candidates = ma._select_limit_up_rebound_candidates(overview)
+        table_block = ma._build_sector_block(overview)
+        payload = ma.build_market_review_payload(
+            overview,
+            [],
+            "A股复盘报告",
+            market_light_snapshot={"dimensions": {"breadth": {"score": 55, "available": False}}},
+        )
+
+        assert [item["name"] for item in overview.limit_up_rebound_candidates] == ["左高右低"]
+        candidate = overview.limit_up_rebound_candidates[0]
+        assert candidate["prior_limit_up_date"] == "2026-03-05"
+        assert candidate["consecutive_boards"] == 2
+        assert candidate["window_days"] == 10
+        assert 14.0 <= candidate["range_pct"] <= 25.0
+        assert candidate["high_date"] < candidate["low_date"]
+        assert "#### 连板梯队" in table_block
+        assert table_block.index("#### 连板梯队") < table_block.index("#### 涨停回踩选股")
+        assert "| `左高右低` | 000001 | 2板 |" in table_block
+        assert "收盘高点" in table_block
+        assert "收盘低点" in table_block
+        assert "无前涨停" not in table_block
+        assert "振幅过大" not in table_block
+        assert "ST测试" not in table_block
+        assert "三板形态" not in table_block
+        assert payload["limit_up_rebound_candidates"][0]["name"] == "左高右低"
+        ma.data_manager.get_daily_data.assert_any_call("000001", days=20)
+        assert call("000005", days=20) not in ma.data_manager.get_daily_data.call_args_list
 
     def test_us_english_indices_do_not_label_turnover_as_cny(self):
         from src.core.market_profile import US_PROFILE

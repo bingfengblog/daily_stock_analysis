@@ -644,6 +644,45 @@ class MarketReviewLocalizationTestCase(unittest.TestCase):
         self.assertIn("| 4板 | `汉森制药` |", markdown)
         self.assertIn("| 3板 | `深中华A` `中关村` |", markdown)
 
+    def test_render_market_review_payload_markdown_appends_pullback_screen_fallback(self) -> None:
+        markdown = market_review_module._render_market_review_payload_markdown(
+            {
+                "title": "2026-06-03 大盘复盘",
+                "language": "zh",
+                "sections": [
+                    {
+                        "key": "overview",
+                        "title": "Overview",
+                        "markdown": "> 今日短线情绪回暖。",
+                    }
+                ],
+                "limit_up_rebound_candidates": [
+                    {
+                        "code": "000001",
+                        "name": "左高右低",
+                        "consecutive_boards": 2,
+                        "prior_limit_up_date": "2026-03-05",
+                        "window_days": 7,
+                        "high": 12.0,
+                        "high_date": "2026-03-06",
+                        "low": 10.0,
+                        "low_date": "2026-03-13",
+                        "range_pct": 20.0,
+                    },
+                ],
+            },
+            wrapper_title="🎯 大盘复盘",
+        )
+
+        self.assertIn("### 板块主线", markdown)
+        self.assertIn("#### 涨停回踩选股", markdown)
+        self.assertIn("| 股票 | 代码 | 连板 | 区间 | 前涨停日 | 收盘高点 | 收盘低点 | 高低差 |", markdown)
+        self.assertIn(
+            "| `左高右低` | 000001 | 2板 | 7日 | 2026-03-05 | 2026-03-06 12.00 | "
+            "2026-03-13 10.00 | 20.00% |",
+            markdown,
+        )
+
     def test_render_market_review_payload_markdown_keeps_injected_chinese_sector_block_once(self) -> None:
         markdown = market_review_module._render_market_review_payload_markdown(
             {

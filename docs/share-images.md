@@ -73,7 +73,7 @@ npx playwright install chromium
 | 指数表现 | `MarketOverview.indices`、`color_scheme` | 最多展示 4 个主要指数的最新值和涨跌幅；结构化 payload 持久化生成时的 `green_up` / `red_up` 颜色语义 |
 | 市场宽度 | `up_count`、`down_count`、`limit_up_count`、`limit_down_count`、`total_amount` | 仅在数据源支持且报告包含结构化数据时展示 |
 | 信号拆解 | `market_light.dimensions` | 只展示 `available != false` 的确定性评分；不把不支持的维度占位分 50 当作真实数据 |
-| 强弱板块 | `sectors.top`、`sectors.bottom`、`limit_up_ladder` | 领涨、领跌各展示 Top 3；A 股复盘可补充 2 板及以上连板梯队；没有板块榜或梯队数据的市场自动隐藏 |
+| 强弱板块 | `sectors.top`、`sectors.bottom`、`limit_up_ladder`、`limit_up_rebound_candidates` | 领涨、领跌各展示 Top 3；A 股复盘可补充 2 板及以上连板梯队，以及连板数不超过 2 的、按收盘价计算区间高低点的涨停回踩选股；没有板块榜或梯队数据的市场自动隐藏 |
 | 资金观察 | 复盘“资金与情绪”章节 | 提炼涨跌比、增量成交和资金风格，不把成交额或新闻推断伪装成净流入 |
 | 重点跟踪 | 复盘“明日交易计划”的关注/回避方向 | 最多各展示 2 个板块或主题；当前 payload 没有 `leader_stocks`，因此不编造重点个股 |
 | 明日策略 | 复盘“明日交易计划”章节 | 展示结论、仓位区间和失效条件，不与重点跟踪重复 |
@@ -143,7 +143,7 @@ png_bytes = markdown_to_image(
 )
 ```
 
-大盘报告应沿用 `MarketAnalyzer` 生成的“盘面信号、指数结构、板块主线（含连板梯队）、消息催化、明日交易计划、风险提示”章节；不建议在外部另造一套字段名称，否则模板会按缺失字段处理。
+大盘报告应沿用 `MarketAnalyzer` 生成的“盘面信号、指数结构、板块主线（含连板梯队与涨停回踩选股）、消息催化、明日交易计划、风险提示”章节；不建议在外部另造一套字段名称，否则模板会按缺失字段处理。
 
 ## 视觉与内容边界
 
