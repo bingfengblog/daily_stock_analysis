@@ -56,6 +56,12 @@ _CHINESE_SECTION_PATTERNS = {
     "news_catalysts": r"###\s*五、(?:消息催化|后市展望)",
 }
 
+_LIMIT_UP_PULLBACK_MIN_WINDOW_DAYS = 5
+_LIMIT_UP_PULLBACK_MAX_WINDOW_DAYS = 10
+_LIMIT_UP_PULLBACK_MIN_RANGE_PCT = 10.0
+_LIMIT_UP_PULLBACK_MAX_RANGE_PCT = 25.0
+_LIMIT_UP_CHANGE_THRESHOLD_PCT = 9.8
+
 
 @dataclass
 class MarketIndex:
@@ -107,6 +113,8 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    limit_up_pool: List[Dict] = field(default_factory=list)   # 涨停池明细（含连板数）
+    limit_up_rebound_candidates: List[Dict] = field(default_factory=list)  # 涨停回踩选股结果
 
 
 @dataclass
@@ -570,6 +578,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
             self._get_concept_rankings(overview)
+            self._get_limit_up_pool(overview)
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
@@ -696,6 +705,34 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         except Exception as e:
             logger.warning("[大盘] %s action=get_concept_rankings status=failed error=%s", self._log_context(), e)
+
+    def _get_limit_up_pool(self, overview: MarketOverview):
+        """获取涨停池明细，用于复盘报告连板梯队（A 股专属，fail-open）。"""
+        if self.region != "cn":
+            return
+        try:
+            logger.info("[大盘] %s action=get_limit_up_pool status=start", self._log_context())
+
+            query_date = overview.date.replace("-", "")
+            rows = self.data_manager.get_limit_up_pool(date=query_date, n=200)
+
+            if rows:
+                overview.limit_up_pool = rows
+                overview.limit_up_rebound_candidates = self._select_limit_up_rebound_candidates(overview)
+                ladder = self._build_limit_up_ladder(overview)
+                logger.info(
+                    "[大盘] %s action=get_limit_up_pool status=success count=%d "
+                    "ladder_levels=%s rebound_candidates=%d",
+                    self._log_context(),
+                    len(rows),
+                    [item["label"] for item in ladder],
+                    len(overview.limit_up_rebound_candidates),
+                )
+            else:
+                logger.warning("[大盘] %s action=get_limit_up_pool status=empty", self._log_context())
+
+        except Exception as e:
+            logger.warning("[大盘] %s action=get_limit_up_pool status=failed error=%s", self._log_context(), e)
     
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
@@ -1046,6 +1083,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "top": list(overview.top_concepts or []),
                 "bottom": list(overview.bottom_concepts or []),
             },
+            "limit_up_pool": list(overview.limit_up_pool or []),
+            "limit_up_ladder": self._build_limit_up_ladder(overview),
+            "limit_up_rebound_candidates": list(overview.limit_up_rebound_candidates or []),
             "news": [self._normalize_news_item(item) for item in (news or [])[:8]],
             "sections": sections,
             "markdown_report": report,
@@ -1372,12 +1412,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         return "\n".join(lines)
 
     def _build_sector_block(self, overview: MarketOverview) -> str:
-        """Build industry and concept ranking blocks."""
+        """Build industry, concept and limit-up streak blocks."""
         if (
             not overview.top_sectors
             and not overview.bottom_sectors
             and not overview.top_concepts
             and not overview.bottom_concepts
+            and not overview.limit_up_pool
+            and not overview.limit_up_rebound_candidates
         ):
             return ""
         lines = []
@@ -1408,6 +1450,98 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             append_ranking("#### 行业板块领跌 Top 5", "行业板块", overview.bottom_sectors)
             append_ranking("#### 概念板块领涨 Top 5", "概念板块", overview.top_concepts)
             append_ranking("#### 概念板块领跌 Top 5", "概念板块", overview.bottom_concepts)
+        ladder_block = self._build_limit_up_ladder_block(overview, language=language)
+        if ladder_block:
+            if lines:
+                lines.append("")
+            lines.append(ladder_block)
+        selection_block = self._build_limit_up_rebound_selection_block(overview, language=language)
+        if selection_block:
+            if lines:
+                lines.append("")
+            lines.append(selection_block)
+        return "\n".join(lines)
+
+    def _build_limit_up_ladder_block(
+        self,
+        overview: MarketOverview,
+        *,
+        language: str | None = None,
+    ) -> str:
+        """Build a Markdown table for 2+ board streaks, excluding first boards."""
+        ladder = self._build_limit_up_ladder(overview)
+        if not ladder:
+            return ""
+        language = language or self._get_review_language()
+        if language == "en":
+            lines = [
+                "#### Limit-up Streak Ladder",
+                "| Streak | Companies |",
+                "| --- | --- |",
+            ]
+        else:
+            lines = [
+                "#### 连板梯队",
+                "| 连板数 | 上市公司 |",
+                "| --- | --- |",
+            ]
+        for item in ladder:
+            names = " ".join(
+                f"`{self._escape_table_code_label(stock.get('name'))}`"
+                for stock in item.get("stocks", [])
+                if stock.get("name")
+            )
+            if names:
+                lines.append(f"| {item['label']} | {names} |")
+        return "\n".join(lines)
+
+    def _build_limit_up_rebound_selection_block(
+        self,
+        overview: MarketOverview,
+        *,
+        language: str | None = None,
+    ) -> str:
+        """Build the post-ladder limit-up pullback screen block."""
+        candidates = overview.limit_up_rebound_candidates or []
+        if not candidates and not overview.limit_up_pool:
+            return ""
+        language = language or self._get_review_language()
+        if language == "en":
+            lines = [
+                "#### Limit-up Pullback Screen",
+                "| Stock | Code | Streak | Window | Prior Limit-up | Close High | Close Low | Range |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            empty_text = "- No non-ST limit-up stocks matched the pullback screen."
+            window_suffix = "d"
+        else:
+            lines = [
+                "#### 涨停回踩选股",
+                "| 股票 | 代码 | 连板 | 区间 | 前涨停日 | 收盘高点 | 收盘低点 | 高低差 |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+            empty_text = "- 暂无符合条件的今日涨停非 ST 个股。"
+            window_suffix = "日"
+
+        if not candidates:
+            return "\n".join([lines[0], empty_text])
+
+        for item in candidates:
+            name = self._escape_table_code_label(item.get("name"))
+            code = self._escape_table_code_label(item.get("code")) or "-"
+            if not name:
+                continue
+            boards = self._coerce_int(item.get("consecutive_boards")) or "-"
+            board_text = f"{boards}板" if isinstance(boards, int) else str(boards)
+            window_days = item.get("window_days") or "-"
+            prior_limit_date = self._escape_table_code_label(item.get("prior_limit_up_date")) or "-"
+            high_text = self._format_price_date_cell(item.get("high"), item.get("high_date"))
+            low_text = self._format_price_date_cell(item.get("low"), item.get("low_date"))
+            range_text = self._format_optional_pct(item.get("range_pct"))
+            lines.append(
+                f"| `{name}` | {code} | {board_text} | {window_days}{window_suffix} | {prior_limit_date} | "
+                f"{high_text} | {low_text} | {range_text} |"
+            )
         return "\n".join(lines)
 
     def _build_news_block(self, news: List) -> str:
@@ -1489,6 +1623,236 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 continue
             parts.append(f"{name}({cls._format_signed_pct(item.get('change_pct'))})")
         return ", ".join(parts)
+
+    @classmethod
+    def _build_limit_up_ladder(cls, overview: MarketOverview) -> List[Dict[str, Any]]:
+        """Group limit-up pool rows by consecutive boards, excluding first boards."""
+        grouped: Dict[int, List[Dict[str, str]]] = {}
+        seen_by_level: Dict[int, set[str]] = {}
+        for item in overview.limit_up_pool or []:
+            if not isinstance(item, dict):
+                continue
+            boards = cls._coerce_int(item.get("consecutive_boards", item.get("连板数")))
+            if boards is None or boards < 2:
+                continue
+            name = str(item.get("name") or item.get("名称") or "").strip()
+            if not name:
+                continue
+            code = str(item.get("code") or item.get("代码") or "").strip()
+            dedupe_key = code or name
+            level_seen = seen_by_level.setdefault(boards, set())
+            if dedupe_key in level_seen:
+                continue
+            level_seen.add(dedupe_key)
+            grouped.setdefault(boards, []).append({"code": code, "name": name})
+
+        return [
+            {
+                "consecutive_boards": boards,
+                "label": f"{boards}板",
+                "stocks": grouped[boards],
+            }
+            for boards in sorted(grouped, reverse=True)
+        ]
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return None
+            if pd.isna(value):
+                return None
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _format_limit_up_ladder_summary(cls, overview: MarketOverview) -> str:
+        parts = []
+        for item in cls._build_limit_up_ladder(overview):
+            names = "、".join(
+                stock["name"] for stock in item.get("stocks", [])[:8] if stock.get("name")
+            )
+            if not names:
+                continue
+            extra = len(item.get("stocks", [])) - 8
+            suffix = f"等{len(item.get('stocks', []))}只" if extra > 0 else ""
+            parts.append(f"{item['label']}: {names}{suffix}")
+        return "; ".join(parts)
+
+    def _select_limit_up_rebound_candidates(self, overview: MarketOverview) -> List[Dict[str, Any]]:
+        """Screen today's non-ST limit-up stocks for prior limit-up then pullback structure."""
+        if self.region != "cn" or not overview.limit_up_pool:
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for item in overview.limit_up_pool:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or item.get("代码") or "").strip()
+            name = str(item.get("name") or item.get("名称") or "").strip()
+            boards = self._coerce_int(item.get("consecutive_boards", item.get("连板数")))
+            if not code or not name or self._is_st_stock_name(name):
+                continue
+            if boards is None or boards < 1 or boards > 2:
+                continue
+
+            try:
+                daily_result = self.data_manager.get_daily_data(code, days=20)
+                history = self._normalize_daily_history(daily_result, trade_date=overview.date)
+                match = self._match_limit_up_pullback_pattern(history)
+            except Exception as exc:
+                logger.debug(
+                    "[大盘] %s action=select_limit_up_rebound stock=%s status=skipped error=%s",
+                    self._log_context(),
+                    code,
+                    exc,
+                )
+                continue
+
+            if not match:
+                continue
+            candidates.append({
+                "code": code,
+                "name": name,
+                "consecutive_boards": boards,
+                "prior_limit_up_date": match["prior_limit_up_date"],
+                "window_days": match["window_days"],
+                "high": match["high"],
+                "high_date": match["high_date"],
+                "low": match["low"],
+                "low_date": match["low_date"],
+                "range_pct": match["range_pct"],
+            })
+        return candidates
+
+    @classmethod
+    def _normalize_daily_history(
+        cls,
+        daily_result: Any,
+        *,
+        trade_date: str,
+    ) -> pd.DataFrame:
+        """Return prior daily bars with standard date/close/pct_chg columns."""
+        if isinstance(daily_result, tuple):
+            df = daily_result[0]
+        else:
+            df = daily_result
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return pd.DataFrame()
+
+        result = df.copy()
+        aliases = {
+            "date": ("date", "日期"),
+            "high": ("high", "最高"),
+            "low": ("low", "最低"),
+            "close": ("close", "收盘"),
+            "pct_chg": ("pct_chg", "涨跌幅", "change_pct"),
+        }
+        rename_map = {}
+        for target, names in aliases.items():
+            if target in result.columns:
+                continue
+            source = next((name for name in names if name in result.columns), None)
+            if source:
+                rename_map[source] = target
+        if rename_map:
+            result = result.rename(columns=rename_map)
+
+        required = {"date", "close"}
+        if not required.issubset(result.columns):
+            return pd.DataFrame()
+
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        for column in ("high", "low", "close", "pct_chg"):
+            if column in result.columns:
+                result[column] = pd.to_numeric(result[column], errors="coerce")
+        if "pct_chg" not in result.columns and "close" in result.columns:
+            result["pct_chg"] = result["close"].pct_change() * 100
+        if "pct_chg" not in result.columns:
+            return pd.DataFrame()
+
+        trade_day = pd.to_datetime(trade_date, errors="coerce")
+        result = result.dropna(subset=["date", "close", "pct_chg"])
+        result = result.sort_values("date")
+        if not pd.isna(trade_day):
+            result = result[result["date"] < trade_day]
+        result["date"] = result["date"].dt.strftime("%Y-%m-%d")
+        return result.reset_index(drop=True)
+
+    @classmethod
+    def _match_limit_up_pullback_pattern(cls, history: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """Match the prior-limit-up plus left-high/right-low pullback pattern."""
+        if history is None or history.empty or len(history) < _LIMIT_UP_PULLBACK_MIN_WINDOW_DAYS:
+            return None
+
+        max_days = min(_LIMIT_UP_PULLBACK_MAX_WINDOW_DAYS, len(history))
+        lookback = history.tail(max_days).reset_index(drop=True)
+        for window_days in range(_LIMIT_UP_PULLBACK_MIN_WINDOW_DAYS, max_days + 1):
+            window = lookback.tail(window_days).reset_index(drop=True)
+            prior_limit_rows = window[
+                window["pct_chg"] >= _LIMIT_UP_CHANGE_THRESHOLD_PCT
+            ]
+            if prior_limit_rows.empty:
+                continue
+            high_idx = window["close"].idxmax()
+            low_idx = window["close"].idxmin()
+            if int(high_idx) >= int(low_idx):
+                continue
+            high = float(window.loc[high_idx, "close"])
+            low = float(window.loc[low_idx, "close"])
+            if low <= 0:
+                continue
+            range_pct = (high - low) / low * 100
+            if (
+                _LIMIT_UP_PULLBACK_MIN_RANGE_PCT
+                <= range_pct
+                <= _LIMIT_UP_PULLBACK_MAX_RANGE_PCT
+            ):
+                prior_limit_up_date = str(prior_limit_rows.iloc[-1]["date"])
+                return {
+                    "prior_limit_up_date": prior_limit_up_date,
+                    "window_days": window_days,
+                    "high": high,
+                    "high_date": str(window.loc[high_idx, "date"]),
+                    "low": low,
+                    "low_date": str(window.loc[low_idx, "date"]),
+                    "range_pct": range_pct,
+                }
+        return None
+
+    @staticmethod
+    def _is_st_stock_name(name: str) -> bool:
+        normalized = str(name or "").strip().upper()
+        return normalized.startswith(("*ST", "ST", "S*ST", "SST")) or "退市" in normalized
+
+    @classmethod
+    def _format_limit_up_rebound_candidates_summary(cls, overview: MarketOverview) -> str:
+        parts = []
+        for item in overview.limit_up_rebound_candidates or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            range_pct = cls._format_optional_pct(item.get("range_pct"))
+            parts.append(f"{name}({item.get('window_days', '-')}日/{range_pct})")
+        return "、".join(parts[:12])
+
+    @classmethod
+    def _format_price_date_cell(cls, price: Any, date_value: Any) -> str:
+        try:
+            price_text = f"{float(price):.2f}"
+        except (TypeError, ValueError):
+            price_text = "N/A"
+        date_text = cls._escape_table_code_label(date_value)
+        return f"{date_text} {price_text}".strip()
+
+    @staticmethod
+    def _escape_table_code_label(value: Any) -> str:
+        return str(value or "").strip().replace("`", "").replace("|", "\\|")
 
     @staticmethod
     def _escape_markdown_link_label(value: str) -> str:
@@ -1579,7 +1943,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 (Interpret what turnover, participation, and flow signals imply.)
 
 ### 4. Sector Highlights
-(Distinguish industry-sector moves from concept/theme moves, then analyze drivers and persistence.)
+(Distinguish industry-sector moves from concept/theme moves; then use the 2+ limit-up streak ladder and pullback screen when available.)
 
 ### 5. Outlook
 (Provide the near-term outlook based on price action and news.)
@@ -1598,7 +1962,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 section_number += 1
             if self.profile.has_sector_rankings:
                 sections.append(f"""### {section_number}. Sector Highlights
-(Analyze only the provided industry-sector and concept/theme rankings.)""")
+(Analyze only the provided industry-sector rankings, concept/theme rankings, 2+ limit-up streak ladder, and pullback screen when available.)""")
                 section_number += 1
             sections.extend([
                 f"""### {section_number}. News Catalysts
@@ -1614,7 +1978,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         if self.profile.has_market_stats and self.profile.has_sector_rankings:
             return """### 三、板块主线
-（区分行业板块与概念题材，分析领涨/领跌背后的逻辑、持续性和是否形成主线）
+（区分行业板块与概念题材，结合连板梯队（不含首板）和涨停回踩选股观察短线情绪和主线持续性）
 
 ### 四、资金与情绪
 （解读成交额、涨跌停结构、市场宽度和风险偏好）
@@ -1638,7 +2002,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             section_number += 1
 
         if self.profile.has_sector_rankings:
-            add_section("板块主线", "（仅分析已提供的行业板块与概念题材榜单，不扩展未提供的数据）")
+            add_section("板块主线", "（仅分析已提供的行业板块、概念题材榜单、连板梯队和涨停回踩选股，不扩展未提供的数据）")
         if self.profile.has_market_stats:
             add_section("资金与情绪", "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）")
         add_section(
@@ -1667,6 +2031,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         bottom_sectors_text = self._format_ranking_summary(overview.bottom_sectors)
         top_concepts_text = self._format_ranking_summary(overview.top_concepts)
         bottom_concepts_text = self._format_ranking_summary(overview.bottom_concepts)
+        limit_up_ladder_text = self._format_limit_up_ladder_summary(overview)
+        limit_up_rebound_text = self._format_limit_up_rebound_candidates_summary(overview)
         
         # 新闻信息 - 支持 SearchResult 对象或字典
         news_text = ""
@@ -1698,7 +2064,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 Industry leading: {top_sectors_text if top_sectors_text else "N/A"}
 Industry lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}
 Concept leading: {top_concepts_text if top_concepts_text else "N/A"}
-Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
+Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}
+Limit-up streak ladder (2+ only, excludes first-board): {limit_up_ladder_text if limit_up_ladder_text else "N/A"}
+Limit-up pullback screen: {limit_up_rebound_text if limit_up_rebound_text else "N/A"}"""
 
             data_limit_lines = []
             if not self.profile.has_market_stats:
@@ -1721,7 +2089,9 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 行业领涨: {top_sectors_text if top_sectors_text else "暂无数据"}
 行业领跌: {bottom_sectors_text if bottom_sectors_text else "暂无数据"}
 概念领涨: {top_concepts_text if top_concepts_text else "暂无数据"}
-概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}"""
+概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}
+连板梯队（不含首板）: {limit_up_ladder_text if limit_up_ladder_text else "暂无数据"}
+涨停回踩选股: {limit_up_rebound_text if limit_up_rebound_text else "暂无数据"}"""
 
             data_limit_lines = []
             if not self.profile.has_market_stats:
@@ -1939,13 +2309,27 @@ Output the report content directly, no extra commentary.
 {stats_block}
 """
             sector_section = ""
-            if self.profile.has_sector_rankings and (top_text or bottom_text or top_concept_text or bottom_concept_text):
+            ladder_block = self._build_limit_up_ladder_block(overview, language=template_language)
+            selection_block = self._build_limit_up_rebound_selection_block(
+                overview,
+                language=template_language,
+            )
+            if self.profile.has_sector_rankings and (
+                top_text
+                or bottom_text
+                or top_concept_text
+                or bottom_concept_text
+                or ladder_block
+                or selection_block
+            ):
                 sector_section = f"""
 ### 4. Sector / Theme Highlights
 - **Industry Leaders**: {top_text or "N/A"}
 - **Industry Laggards**: {bottom_text or "N/A"}
 - **Concept Leaders**: {top_concept_text or "N/A"}
 - **Concept Laggards**: {bottom_concept_text or "N/A"}
+{ladder_block}
+{selection_block}
 """
             market_names = {
                 "us": "US Market Recap",

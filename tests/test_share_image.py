@@ -321,6 +321,10 @@ def test_market_share_image_prefers_structured_market_metrics():
             "top": [{"name": "半导体", "change_pct": 4.25}],
             "bottom": [{"name": "货币金融服务", "change_pct": -1.10}],
         },
+        "limit_up_ladder": [
+            {"label": "4板", "stocks": [{"name": "汉森制药"}]},
+            {"label": "3板", "stocks": [{"name": "深中华A"}, {"name": "中关村"}]},
+        ],
     }
     html = build_share_image_html(
         """# A股大盘复盘
@@ -357,6 +361,8 @@ def test_market_share_image_prefers_structured_market_metrics():
     assert "4690" in html
     assert "2.56万亿" in html
     assert "半导体" in html
+    assert "4板 汉森制药" in html
+    assert "3板 深中华A/中关村" in html
     assert "科创50" in html
     assert "信号拆解" in html
     assert "86/100" in html
@@ -368,6 +374,33 @@ def test_market_share_image_prefers_structured_market_metrics():
     assert "资金观察" in html
     assert "+2000亿" in html
     assert "20/100" not in html
+
+
+def test_market_share_image_appends_limit_up_pullback_candidates():
+    payload = {
+        "kind": "market_review",
+        "region": "cn",
+        "date": "2026-08-01",
+        "sectors": {
+            "top": [{"name": "半导体", "change_pct": 4.25}],
+        },
+        "limit_up_rebound_candidates": [
+            {"name": "左高右低", "range_pct": 20.0},
+            {"name": "回踩确认", "range_pct": 12.35},
+        ],
+    }
+
+    html = build_share_image_html(
+        "# A股大盘复盘\n\n## 板块主线\n\n### 涨停回踩选股\n\n| 股票 | 高低差 |\n| --- | --- |\n| 左高右低 | 20.00% |",
+        generated_on=date(2026, 8, 1),
+        structured_payload=payload,
+    )
+
+    assert "半导体" in html
+    assert "回踩 左高右低" in html
+    assert "20.00%" in html
+    assert "回踩 回踩确认" in html
+    assert "12.35%" in html
 
 
 def test_market_share_image_hides_unavailable_dimensions_and_uses_payload_color_scheme():

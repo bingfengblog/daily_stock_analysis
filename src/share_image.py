@@ -605,6 +605,17 @@ def _signed_percent(value: object) -> str:
     return f"{number:+.2f}%"
 
 
+def _unsigned_percent(value: object) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        text = _clean_value(value, limit=18)
+        return text if "%" in text else f"{text}%" if text else ""
+    return f"{number:.2f}%"
+
+
 def _price_tokens(value: object) -> list[str]:
     text = _plain(value)
     # Indicator labels such as MA5/MA10 are not prices; nearby parenthesized
@@ -1695,6 +1706,57 @@ def _market_data_from_payload(
                 negative_tone=negative_tone,
                 default_tone=negative_tone,
             )
+    limit_up_ladder = payload.get("limit_up_ladder")
+    if isinstance(limit_up_ladder, list):
+        ladder_rows = []
+        for item in limit_up_ladder[:3]:
+            if not isinstance(item, Mapping):
+                continue
+            label = _clean_value(item.get("label"), limit=8)
+            stocks = item.get("stocks")
+            if not label or not isinstance(stocks, list):
+                continue
+            names = []
+            for stock in stocks[:2]:
+                if not isinstance(stock, Mapping):
+                    continue
+                name = _clean_value(stock.get("name"), limit=10)
+                if name:
+                    names.append(name)
+            if names:
+                ladder_rows.append({
+                    "name": f"{label} {'/'.join(names)}",
+                    "change_pct": None,
+                })
+        if ladder_rows:
+            poster.sectors = _merge_sector_rankings(
+                poster.sectors,
+                ladder_rows,
+                positive_tone=positive_tone,
+                negative_tone=negative_tone,
+                default_tone="hot",
+            )
+    pullback_candidates = payload.get("limit_up_rebound_candidates")
+    if isinstance(pullback_candidates, list):
+        existing_names = {
+            _normalize_ranking_name(name)
+            for name, _change, _tone in poster.sectors
+            if _normalize_ranking_name(name)
+        }
+        for item in pullback_candidates[:3]:
+            if not isinstance(item, Mapping) or len(poster.sectors) >= 3:
+                continue
+            name = _clean_value(item.get("name"), limit=10)
+            if not name:
+                continue
+            display_name = _clean_value(f"回踩 {name}", limit=18)
+            key = _normalize_ranking_name(display_name)
+            if key in existing_names:
+                continue
+            range_pct = _unsigned_percent(item.get("range_pct"))
+            poster.sectors.append((display_name, range_pct, "hot"))
+            if key:
+                existing_names.add(key)
     return poster
 
 
